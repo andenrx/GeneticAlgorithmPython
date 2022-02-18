@@ -34,6 +34,7 @@ class GA:
                  random_mutation_min_val=-1.0,
                  random_mutation_max_val=1.0,
                  gene_space=None,
+                 cache_fitness=True,
                  allow_duplicate_genes=True,
                  on_start=None,
                  on_fitness=None,
@@ -285,9 +286,9 @@ class GA:
             else:
                 self.valid_parameters = False
                 raise TypeError("The expected type of both the sol_per_pop and num_genes parameters is int but ({sol_per_pop_type}) and {num_genes_type} found.".format(sol_per_pop_type=type(sol_per_pop), num_genes_type=type(num_genes)))
-        elif numpy.array(initial_population).ndim != 2:
+        elif numpy.array(initial_population).ndim not in {2, 3}:
             self.valid_parameters = False
-            raise ValueError("A 2D list is expected to the initail_population parameter but a ({initial_population_ndim}-D) list found.".format(initial_population_ndim=numpy.array(initial_population).ndim))
+            raise ValueError("A 2D or 3D list is expected to the initail_population parameter but a ({initial_population_ndim}-D) list found.".format(initial_population_ndim=numpy.array(initial_population).ndim))
         else:
             # Forcing the initial_population array to have the data type assigned to the gene_type parameter.
             if self.gene_type_single == True:
@@ -308,8 +309,8 @@ class GA:
                                                                            self.gene_type[gene_idx][1])
 
             self.population = self.initial_population.copy() # A NumPy array holding the initial population.
-            self.num_genes = self.initial_population.shape[1] # Number of genes in the solution.
-            self.sol_per_pop = self.initial_population.shape[0]  # Number of solutions in the population.
+            self.num_genes = self.initial_population.shape[-1] # Number of genes in the solution.
+            self.sol_per_pop = self.initial_population.shape[-2]  # Number of solutions in the population.
             self.pop_size = (self.sol_per_pop,self.num_genes) # The population size.
 
         # Round initial_population and population
@@ -639,6 +640,8 @@ class GA:
         else:
             self.valid_parameters = False
             raise ValueError("The value assigned to the fitness_func parameter is expected to be of type function but ({fitness_func_type}) found.".format(fitness_func_type=type(fitness_func)))
+
+        self.cache_fitness = cache_fitness
 
         # Check if the on_start exists.
         if not (on_start is None):
@@ -1143,12 +1146,15 @@ class GA:
         if self.valid_parameters == False:
             raise ValueError("ERROR calling the cal_pop_fitness() method: \nPlease check the parameters passed while creating an instance of the GA class.\n")
 
-        pop_fitness = []
+        #pop_fitness = []
+        pop_fitness = numpy.empty(self.population.shape[:-1])
         # Calculating the fitness value of each solution in the current population.
-        for sol_idx, sol in enumerate(self.population):
+        for sol_idx in numpy.ndindex(self.population.shape[:-1]):
+            sol = self.population[sol_idx]
+        #for sol_idx, sol in enumerate(self.population):
 
             # Check if this solution is a parent from the previous generation and its fitness value is already calculated. If so, use the fitness value instead of calling the fitness function.
-            if (self.last_generation_parents is not None) and len(numpy.where(numpy.all(self.last_generation_parents == sol, axis=1))[0] > 0):
+            if self.cache_fitness and (self.last_generation_parents is not None) and len(numpy.where(numpy.all(self.last_generation_parents == sol, axis=1))[0] > 0):
                 # Index of the parent in the parents array (self.last_generation_parents). This is not its index within the population.
                 parent_idx = numpy.where(numpy.all(self.last_generation_parents == sol, axis=1))[0][0]
                 # Index of the parent in the population.
@@ -1161,9 +1167,8 @@ class GA:
                     pass
                 else:
                     raise ValueError("The fitness function should return a number but the value {fit_val} of type {fit_type} found.".format(fit_val=fitness, fit_type=type(fitness)))
-            pop_fitness.append(fitness)
+            pop_fitness[sol_idx] = fitness
 
-        pop_fitness = numpy.array(pop_fitness)
 
         return pop_fitness
 
@@ -1212,28 +1217,39 @@ class GA:
                 self.solutions_fitness.extend(self.last_generation_fitness)
 
             # Selecting the best parents in the population for mating.
-            if callable(self.parent_selection_type):
-                self.last_generation_parents, self.last_generation_parents_indices = self.select_parents(self.last_generation_fitness, self.num_parents_mating, self)
-            else:
-                self.last_generation_parents, self.last_generation_parents_indices = self.select_parents(self.last_generation_fitness, num_parents=self.num_parents_mating)
+            self.last_generation_parents = numpy.empty(
+                self.population.shape[:-2] + (self.num_parents_mating, self.population.shape[-1]),
+                dtype=self.population.dtype
+            )
+            self.last_generation_parents_indices = numpy.empty(self.last_generation_parents.shape[:-1], dtype=int)
+            for idx in numpy.ndindex(self.population.shape[:-2]):
+                if callable(self.parent_selection_type):
+                    self.last_generation_parents[idx], self.last_generation_parents_indices[idx] = self.select_parents(self.population[idx], self.last_generation_fitness[idx], self.num_parents_mating, self)
+                else:
+                    self.last_generation_parents[idx], self.last_generation_parents_indices[idx] = self.select_parents(self.population[idx], self.last_generation_fitness[idx], num_parents=self.num_parents_mating)
             if not (self.on_parents is None):
                 self.on_parents(self, self.last_generation_parents)
 
             # If self.crossover_type=None, then no crossover is applied and thus no offspring will be created in the next generations. The next generation will use the solutions in the current population.
             if self.crossover_type is None:
                 if self.num_offspring <= self.keep_parents:
-                    self.last_generation_offspring_crossover = self.last_generation_parents[0:self.num_offspring]
+                    self.last_generation_offspring_crossover = self.last_generation_parents[...,0:self.num_offspring,:]
                 else:
-                    self.last_generation_offspring_crossover = numpy.concatenate((self.last_generation_parents, self.population[0:(self.num_offspring - self.last_generation_parents.shape[0])]))
+                    self.last_generation_offspring_crossover = numpy.concatenate((self.last_generation_parents, self.population[...,0:(self.num_offspring - self.last_generation_parents.shape[-2]),:]), axis=len(self.population.shape)-2)
             else:
                 # Generating offspring using crossover.
-                if callable(self.crossover_type):
-                    self.last_generation_offspring_crossover = self.crossover(self.last_generation_parents,
-                                                                              (self.num_offspring, self.num_genes),
-                                                                              self)
-                else:
-                    self.last_generation_offspring_crossover = self.crossover(self.last_generation_parents,
-                                                                              offspring_size=(self.num_offspring, self.num_genes))
+                self.last_generation_offspring_crossover = numpy.empty(
+                    self.population.shape[:-2] + (self.num_offspring, self.num_genes), 
+                    dtype=self.population.dtype
+                )
+                for pop_idx in numpy.ndindex(self.population.shape[:-2]):
+                    if callable(self.crossover_type):
+                        self.last_generation_offspring_crossover[pop_idx] = self.crossover(self.last_generation_parents[pop_idx],
+                                                      (self.num_offspring, self.num_genes),
+                                                      self)
+                    else:
+                        self.last_generation_offspring_crossover[pop_idx] = self.crossover(self.last_generation_parents[pop_idx],
+                                                                                      offspring_size=(self.num_offspring, self.num_genes))
                 if not (self.on_crossover is None):
                     self.on_crossover(self, self.last_generation_offspring_crossover)
 
@@ -1254,8 +1270,8 @@ class GA:
                 self.population = self.last_generation_offspring_mutation
             elif (self.keep_parents == -1):
                 # Creating the new population based on the parents and offspring.
-                self.population[0:self.last_generation_parents.shape[0], :] = self.last_generation_parents
-                self.population[self.last_generation_parents.shape[0]:, :] = self.last_generation_offspring_mutation
+                self.population[...,0:self.last_generation_parents.shape[-2], :] = self.last_generation_parents
+                self.population[...,self.last_generation_parents.shape[-2]:, :] = self.last_generation_offspring_mutation
             elif (self.keep_parents > 0):
                 parents_to_keep, _ = self.steady_state_selection(self.last_generation_fitness, num_parents=self.keep_parents)
                 self.population[0:parents_to_keep.shape[0], :] = parents_to_keep
@@ -1326,6 +1342,7 @@ class GA:
         self.solutions = numpy.array(self.solutions)
 
     def steady_state_selection(self, fitness, num_parents):
+        raise Exception("NOT COMPATIBILE YET")
 
         """
         Selects the parents using the steady-state selection technique. Later, these parents will mate to produce the offspring.
@@ -1347,7 +1364,7 @@ class GA:
 
         return parents, fitness_sorted[:num_parents]
 
-    def rank_selection(self, fitness, num_parents):
+    def rank_selection(self, population, fitness, num_parents):
 
         """
         Selects the parents using the rank selection technique. Later, these parents will mate to produce the offspring.
@@ -1361,15 +1378,15 @@ class GA:
         fitness_sorted.reverse()
         # Selecting the best individuals in the current generation as parents for producing the offspring of the next generation.
         if self.gene_type_single == True:
-            parents = numpy.empty((num_parents, self.population.shape[1]), dtype=self.gene_type[0])
+            parents = numpy.empty((num_parents, population.shape[1]), dtype=self.gene_type[0])
         else:
-            parents = numpy.empty((num_parents, self.population.shape[1]), dtype=object)
+            parents = numpy.empty((num_parents, population.shape[1]), dtype=object)
         for parent_num in range(num_parents):
-            parents[parent_num, :] = self.population[fitness_sorted[parent_num], :].copy()
+            parents[parent_num, :] = population[fitness_sorted[parent_num], :].copy()
 
         return parents, fitness_sorted[:num_parents]
 
-    def random_selection(self, fitness, num_parents):
+    def random_selection(self, population, fitness, num_parents):
 
         """
         Selects the parents randomly. Later, these parents will mate to produce the offspring.
@@ -1380,11 +1397,12 @@ class GA:
         """
 
         if self.gene_type_single == True:
-            parents = numpy.empty((num_parents, self.population.shape[1]), dtype=self.gene_type[0])
+            parents = numpy.empty((num_parents, population.shape[-1]), dtype=self.gene_type[0])
         else:
-            parents = numpy.empty((num_parents, self.population.shape[1]), dtype=object)
+            parents = numpy.empty((num_parents, population.shape[-1]), dtype=object)
 
         rand_indices = numpy.random.randint(low=0.0, high=fitness.shape[0], size=num_parents)
+        raise Exception("NOT COMPATIBILE YET")
 
         for parent_num in range(num_parents):
             parents[parent_num, :] = self.population[rand_indices[parent_num], :].copy()
@@ -1392,6 +1410,7 @@ class GA:
         return parents, rand_indices
 
     def tournament_selection(self, fitness, num_parents):
+        raise Exception("NOT COMPATIBILE YET")
 
         """
         Selects the parents using the tournament selection technique. Later, these parents will mate to produce the offspring.
@@ -1418,6 +1437,7 @@ class GA:
         return parents, parents_indices
 
     def roulette_wheel_selection(self, fitness, num_parents):
+        raise Exception("NOT COMPATIBILE YET")
 
         """
         Selects the parents using the roulette wheel selection technique. Later, these parents will mate to produce the offspring.
@@ -1459,7 +1479,8 @@ class GA:
                     break
         return parents, parents_indices
 
-    def stochastic_universal_selection(self, fitness, num_parents):
+    def stochastic_universal_selection(self, population, fitness, num_parents):
+        raise Exception("NOT COMPATIBILE YET")
 
         """
         Selects the parents using the stochastic universal selection technique. Later, these parents will mate to produce the offspring.
@@ -1489,9 +1510,9 @@ class GA:
 
         # Selecting the best individuals in the current generation as parents for producing the offspring of the next generation.
         if self.gene_type_single == True:
-            parents = numpy.empty((num_parents, self.population.shape[1]), dtype=self.gene_type[0])
+            parents = numpy.empty((num_parents, population.shape[1]), dtype=self.gene_type[0])
         else:
-            parents = numpy.empty((num_parents, self.population.shape[1]), dtype=object)
+            parents = numpy.empty((num_parents, population.shape[1]), dtype=object)
         
         parents_indices = []
 
@@ -1499,7 +1520,7 @@ class GA:
             rand_pointer = first_pointer + parent_num*pointers_distance
             for idx in range(probs.shape[0]):
                 if (rand_pointer >= probs_start[idx] and rand_pointer < probs_end[idx]):
-                    parents[parent_num, :] = self.population[idx, :].copy()
+                    parents[parent_num, :] = population[idx, :].copy()
                     parents_indices.append(idx)
                     break
         return parents, parents_indices
@@ -1984,9 +2005,9 @@ class GA:
         """
 
         # Random mutation changes one or more gene in each offspring randomly.
-        for offspring_idx in range(offspring.shape[0]):
-            probs = numpy.random.random(size=offspring.shape[1])
-            for gene_idx in range(offspring.shape[1]):
+        for offspring_idx in numpy.ndindex(offspring.shape[:-1]):
+            probs = numpy.random.random(size=offspring.shape[-2])
+            for gene_idx in range(offspring.shape[-2]):
                 if probs[gene_idx] <= self.mutation_probability:
                     # Generating a random value.
                     random_value = numpy.random.uniform(low=self.random_mutation_min_val, 
@@ -2003,9 +2024,9 @@ class GA:
                     # If the mutation_by_replacement attribute is False, then the random value is added to the gene value.
                     else:
                         if self.gene_type_single == True:
-                            random_value = self.gene_type[0](offspring[offspring_idx, gene_idx] + random_value)
+                            random_value = self.gene_type[0](offspring[offspring_idx][gene_idx] + random_value)
                         else:
-                            random_value = self.gene_type[gene_idx][0](offspring[offspring_idx, gene_idx] + random_value)
+                            random_value = self.gene_type[gene_idx][0](offspring[offspring_idx][gene_idx] + random_value)
                             if type(random_value) is numpy.ndarray:
                                 random_value = random_value[0]
 
@@ -2017,7 +2038,7 @@ class GA:
                         if not self.gene_type[gene_idx][1] is None:
                             random_value = numpy.round(random_value, self.gene_type[gene_idx][1])
 
-                    offspring[offspring_idx, gene_idx] = random_value
+                    offspring[offspring_idx][gene_idx] = random_value
 
                     if self.allow_duplicate_genes == False:
                         offspring[offspring_idx], _, _ = self.solve_duplicate_genes_randomly(solution=offspring[offspring_idx],
